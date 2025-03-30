@@ -30,3 +30,4 @@ go.sum
 pgdata
 
 /public/*
+app.log
