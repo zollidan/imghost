@@ -1,17 +1,11 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"os"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gofiber/fiber/v2"
-	"github.com/joho/godotenv"
 )
 
 
@@ -57,39 +51,5 @@ func main() {
 
 
 func ListObjects() {
-	err := godotenv.Load()
-	if err != nil {
-		log.Println("Файл .env не найден или не удалось загрузить")
-	}	
-
-	cfg, err := config.LoadDefaultConfig(context.TODO(), 
-	config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-		os.Getenv("AWS_ID"), 
-		os.Getenv("AWS_SECRET_KEY"), 
-		"")),
-	config.WithBaseEndpoint(os.Getenv("AWS_ENDPOINT")),
-	config.WithRegion(os.Getenv("AWS_REGION")),
-	)
-
-	if err != nil {
-		log.Fatalf("Ошибка конфигурации AWS: %v", err)
-	}
-
-    client := s3.NewFromConfig(cfg)
-
-	resp, err := client.ListObjectsV2(context.TODO(), &s3.ListObjectsV2Input{
-		Bucket: aws.String(os.Getenv("AWS_BUCKET")),
-	})
 	
-	if err != nil {
-		log.Fatalf("Ошибка при запросе к S3: %v", err)
-	}
-
-	for _, obj := range resp.Contents {
-		fmt.Printf("Файл: %s | Размер: %d байт | Последнее изменение: %s\n",
-			aws.ToString(obj.Key),
-			obj.Size,
-			obj.LastModified.Local().Format("2006-01-02 15:04:05"),
-		)
-	}
 }
