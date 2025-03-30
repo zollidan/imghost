@@ -24,3 +24,9 @@ go.sum
 
 # env file
 .env
+
+#db
+
+pgdata
+
+/public/*
