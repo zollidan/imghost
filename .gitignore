@@ -31,3 +31,4 @@ pgdata
 
 /public/*
 app.log
+server

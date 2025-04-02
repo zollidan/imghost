@@ -45,8 +45,8 @@ func main() {
 		return c.Status(fiber.StatusCreated).SendString(fmt.Sprintf("File url: http://localhost:3000/api/static/%s", file.Filename))
 	})
 
-
-    log.Fatal(app.Listen("127.0.0.1:3000"))
+	
+    log.Fatal(app.Listen("localhost:3000")) // for prod 0.0.0.0
 }
 
 
