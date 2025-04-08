@@ -1,2 +1,5 @@
 backend/go.sum
 frontend/package-lock.json
+.DS_Store
+.gitignore
+app.db
