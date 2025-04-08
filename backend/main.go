@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
 	"time"
 
-	jwtware "github.com/gofiber/contrib/jwt"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -17,7 +21,35 @@ import (
 	"gorm.io/gorm"
 )
 
-var db *gorm.DB
+var (
+	s3Client *s3.Client
+	db *gorm.DB
+	bucket string
+)
+
+func initS3() {
+	
+	if err := godotenv.Load("../.env"); err != nil {
+		logrus.Info("No .env file found")
+	}
+
+	bucket = os.Getenv("AWS_BUCKET")
+
+	cfg, err := config.LoadDefaultConfig(context.TODO(),
+		config.WithRegion(os.Getenv("AWS_REGION")),
+		config.WithBaseEndpoint(os.Getenv("AWS_ENDPOINT")),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+			os.Getenv("AWS_ID"),
+			os.Getenv("AWS_SECRET_KEY"),
+			"",
+		)),
+	)
+	if err != nil {
+		log.Fatalf("failed to load config: %v", err)
+	}
+
+	s3Client = s3.NewFromConfig(cfg)
+}
 
 type User struct {
 	ID           uuid.UUID `gorm:"type:uuid;primaryKey"`
@@ -137,6 +169,67 @@ func getUsers(c *fiber.Ctx) error {
 	return c.JSON(users)
 }
 
+func getAllImages(c *fiber.Ctx) error {
+	var images []UserPhoto
+	if err := db.Find(&images).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "Could not get images"})
+	}
+
+	return c.JSON(images)
+}
+
+func createImage(c *fiber.Ctx) error {
+
+	// Get first file from form field "image":
+	file, err := c.FormFile("image")
+	if err != nil {
+		return err
+	}
+
+	var body UserPhoto
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "Cannot parse JSON"})
+	}
+
+
+
+	return c.JSON(fiber.Map{
+		"message": file.Filename,
+	})
+}
+
+func getOneImageInfo(c *fiber.Ctx) error {
+	id := c.Params("id")
+	
+	var image UserPhoto 
+	if err := db.First(&image, "id = ?", id).Error; err != nil {
+		return c.Status(404).JSON(fiber.Map{
+			"error": "User not found",
+		})
+	} 
+
+	return c.JSON(image)
+}
+
+// поправить роутинг для поиск фото проблема в разные id для s3 это key для бд это id
+func getOneImage(c *fiber.Ctx) error {
+	id := c.Params("id") // это ключ объекта в бакете
+
+	result, err := s3Client.GetObject(context.TODO(), &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(id),
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	
+	defer result.Body.Close()
+
+	c.Set(fiber.HeaderContentType, *result.ContentType)
+
+	return c.SendStream(result.Body)
+}
+
 func registerUser(c *fiber.Ctx) error {
 
 	var body UserSchema
@@ -198,12 +291,15 @@ func login(c *fiber.Ctx) error {
 	}
    
 	return c.JSON(fiber.Map{"token": t})
-   }
+}
 
-   func main() {
+func main() {
 	InitDatabase()
+	initS3()
 
-	app := fiber.New()
+	app := fiber.New(fiber.Config{
+		AppName: "ImgHost API",
+	})
 
 	app.Get("/api/hello", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{
@@ -218,15 +314,23 @@ func login(c *fiber.Ctx) error {
 
 
 	// Мидделваре
-	app.Use(jwtware.New(jwtware.Config{
-		SigningKey: jwtware.SigningKey{Key: []byte("secret")},
-	}))
+	// app.Use(jwtware.New(jwtware.Config{
+	// 	SigningKey: jwtware.SigningKey{Key: []byte("secret")},
+	// }))
 
 	// Защищённые маршруты
 	app.Get("/api/users", getUsers)
 	app.Get("/api/users/:id", getOneUser)
 	app.Patch("/api/users/:id", updateUser)
 	app.Delete("/api/users/:id", deleteUser)
+	// app.Get("/api/users/:id/images", getUserImages)
+	// app.Get("/api/users/:id/favorites", getUserFavorites)
+
+	app.Get("/api/images/all", getAllImages)
+	app.Get("/api/images/:id/info", getOneImageInfo)
+	app.Get("/api/images/:id", getOneImage)
+	app.Post("/api/images/upload", createImage)
+	// app.Delete("/api/images/:id", deleteImage)
 
 	log.Println("Server is running on http://127.0.0.1:3000")
 	logrus.Fatal(app.Listen("127.0.0.1:3000"))
