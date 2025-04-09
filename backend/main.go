@@ -8,14 +8,12 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/driver/postgres"
@@ -23,33 +21,38 @@ import (
 )
 
 var (
-	s3Client *s3.Client
 	db *gorm.DB
 	bucket string
+	minioClient *minio.Client
 )
 
-func initS3() {
-	
+func initMinIO() {
 	if err := godotenv.Load("../.env"); err != nil {
 		logrus.Info("No .env file found")
 	}
 
-	bucket = os.Getenv("AWS_BUCKET")
+	bucket = os.Getenv("MINIO_BUCKET")
 
-	cfg, err := config.LoadDefaultConfig(context.TODO(),
-		config.WithRegion(os.Getenv("AWS_REGION")),
-		config.WithBaseEndpoint(os.Getenv("AWS_ENDPOINT")),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-			os.Getenv("AWS_ID"),
-			os.Getenv("AWS_SECRET_KEY"),
-			"",
-		)),
-	)
+	var err error
+	minioClient, err = minio.New("localhost:9000", &minio.Options{
+		Creds:  credentials.NewStaticV4(os.Getenv("MINIO_ID"), os.Getenv("MINIO_SECRET"), ""),
+		Secure: false, // true, если HTTPS
+	})
 	if err != nil {
-		log.Fatalf("failed to load config: %v", err)
+		log.Fatalf("Failed to initialize MinIO client: %v", err)
 	}
 
-	s3Client = s3.NewFromConfig(cfg)
+	// Проверка/создание бакета
+	exists, errBucket := minioClient.BucketExists(context.Background(), bucket)
+	if errBucket != nil {
+		log.Fatalf("Bucket check failed: %v", errBucket)
+	}
+	if !exists {
+		err = minioClient.MakeBucket(context.Background(), bucket, minio.MakeBucketOptions{})
+		if err != nil {
+			log.Fatalf("Could not create bucket: %v", err)
+		}
+	}
 }
 
 type User struct {
@@ -93,9 +96,8 @@ type UserLoginSchema struct {
 }
 
 type UserImageSchema struct {
-	UserID     uuid.UUID    `json:"user_id"`
-	URL        string    `json:"url"`
 	Title      string	 `json:"title"`
+	UserID     uuid.UUID `json:"user_id"`
 }
 
 func InitDatabase() {
@@ -188,6 +190,18 @@ func getAllImages(c *fiber.Ctx) error {
 func createImage(c *fiber.Ctx) error {
 	newImageID := uuid.New()
 
+	title := c.FormValue("title")
+	userIDStr := c.FormValue("user_id")
+	userUUID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "Invalid user_id UUID"})
+	}
+
+	var body UserImageSchema
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "Cannot parse JSON"})
+	}
+
 	fileHeader, err := c.FormFile("image")
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "No file provided"})
@@ -202,28 +216,35 @@ func createImage(c *fiber.Ctx) error {
 	ext := filepath.Ext(fileHeader.Filename)
 	filename := fmt.Sprintf("%s%s", newImageID.String(), ext)
 
-	// Создание запроса на загрузку
-	_, err = s3Client.PutObject(context.TODO(), &s3.PutObjectInput{
-		Bucket:        aws.String(bucket),
-		Key:           aws.String(filename),
+	_, err = minioClient.PutObject(context.Background(), bucket, filename, file, fileHeader.Size, minio.PutObjectOptions{
+		ContentType: fileHeader.Header.Get("Content-Type"),
 	})
 	if err != nil {
-		fmt.Println("S3 Upload Error:", err)
 		return c.Status(500).JSON(fiber.Map{
-			"error":   "Could not upload to S3",
+			"error":   "Could not upload to MinIO",
 			"details": err.Error(),
 		})
 	}
-	s3URL := fmt.Sprintf("https://storage.yandexcloud.net/%s/%s", bucket, filename)
+
+	publicURL := fmt.Sprintf("http://localhost:3000/api/images/%s", filename)
+
+	image := UserPhoto{
+		ID:         newImageID,
+		Title:      title,
+		URL:        publicURL,
+		UserID:     userUUID,
+		UploadedAt: time.Now(),
+	}
+
+	if err := db.Create(&image).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "Could not create image"})
+	}
 
 	return c.JSON(fiber.Map{
 		"message": "Upload successful",
-		"url":     s3URL,
-		"key":     filename,
+		"url":     publicURL,
 	})
-	
 }
-
 
 func getOneImageInfo(c *fiber.Ctx) error {
 	id := c.Params("id")
@@ -239,19 +260,27 @@ func getOneImageInfo(c *fiber.Ctx) error {
 }
 
 func getOneImage(c *fiber.Ctx) error {
-	id := c.Params("id") // это ключ объекта в бакете
+	id := c.Params("id")
 
-	result, err := s3Client.GetObject(context.TODO(), &s3.GetObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(id),
-	})
+	object, err := minioClient.GetObject(context.Background(), bucket, id, minio.GetObjectOptions{})
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("Error fetching object from MinIO: %v", err)
+		return c.Status(500).JSON(fiber.Map{
+			"error": "Failed to fetch image",
+		})
 	}
 
-	c.Set(fiber.HeaderContentType, *result.ContentType)
+	info, err := object.Stat()
+	if err != nil {
+		log.Printf("Error reading object metadata: %v", err)
+		return c.Status(404).JSON(fiber.Map{
+			"error": "Image not found",
+		})
+	}
 
-	return c.SendStream(result.Body)
+	c.Set(fiber.HeaderContentType, info.ContentType)
+
+	return c.SendStream(object)
 }
 
 func registerUser(c *fiber.Ctx) error {
@@ -319,7 +348,7 @@ func login(c *fiber.Ctx) error {
 
 func main() {
 	InitDatabase()
-	initS3()
+	initMinIO()
 
 	app := fiber.New(fiber.Config{
 		AppName: "ImgHost API",
