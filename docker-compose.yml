@@ -5,11 +5,8 @@ services:
     image: postgres:15
     container_name: imghost-postgres
     restart: always
-    environment:
-      POSTGRES_HOST: ${DATABASE_HOST}
-      POSTGRES_USER: ${DATABASE_USER}
-      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
-      POSTGRES_DB: ${DATABASE_NAME}
+    env_file:
+      - .env
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:

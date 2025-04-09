@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -91,16 +92,22 @@ type UserLoginSchema struct {
 	Password string `json:"password"`
 }
 
+type UserImageSchema struct {
+	UserID     uuid.UUID    `json:"user_id"`
+	URL        string    `json:"url"`
+	Title      string	 `json:"title"`
+}
+
 func InitDatabase() {
 
 	if err := godotenv.Load("../.env"); err != nil {
         log.Print("No .env file found")
     }
 
-	host := os.Getenv("DATABASE_HOST")
-	user := os.Getenv("DATABASE_USER")
-	password := os.Getenv("DATABASE_PASSWORD")
-	dbname := os.Getenv("DATABASE_NAME")
+	host := os.Getenv("POSTGRES_HOST")
+	user := os.Getenv("POSTGRES_USER")
+	password := os.Getenv("POSTGRES_PASSWORD")
+	dbname := os.Getenv("POSTGRES_DB")
 
 	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=5432 sslmode=disable", host, user, password, dbname)
 	var err error
@@ -179,24 +186,44 @@ func getAllImages(c *fiber.Ctx) error {
 }
 
 func createImage(c *fiber.Ctx) error {
+	newImageID := uuid.New()
 
-	// Get first file from form field "image":
-	file, err := c.FormFile("image")
+	fileHeader, err := c.FormFile("image")
 	if err != nil {
-		return err
+		return c.Status(400).JSON(fiber.Map{"error": "No file provided"})
 	}
 
-	var body UserPhoto
-	if err := c.BodyParser(&body); err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "Cannot parse JSON"})
+	file, err := fileHeader.Open()
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "Failed to open uploaded file"})
 	}
+	defer file.Close()
 
+	ext := filepath.Ext(fileHeader.Filename)
+	filename := fmt.Sprintf("%s%s", newImageID.String(), ext)
 
+	// Создание запроса на загрузку
+	_, err = s3Client.PutObject(context.TODO(), &s3.PutObjectInput{
+		Bucket:        aws.String(bucket),
+		Key:           aws.String(filename),
+	})
+	if err != nil {
+		fmt.Println("S3 Upload Error:", err)
+		return c.Status(500).JSON(fiber.Map{
+			"error":   "Could not upload to S3",
+			"details": err.Error(),
+		})
+	}
+	s3URL := fmt.Sprintf("https://storage.yandexcloud.net/%s/%s", bucket, filename)
 
 	return c.JSON(fiber.Map{
-		"message": file.Filename,
+		"message": "Upload successful",
+		"url":     s3URL,
+		"key":     filename,
 	})
+	
 }
+
 
 func getOneImageInfo(c *fiber.Ctx) error {
 	id := c.Params("id")
@@ -211,7 +238,6 @@ func getOneImageInfo(c *fiber.Ctx) error {
 	return c.JSON(image)
 }
 
-// поправить роутинг для поиск фото проблема в разные id для s3 это key для бд это id
 func getOneImage(c *fiber.Ctx) error {
 	id := c.Params("id") // это ключ объекта в бакете
 
@@ -222,8 +248,6 @@ func getOneImage(c *fiber.Ctx) error {
 	if err != nil {
 		log.Fatal(err)
 	}
-	
-	defer result.Body.Close()
 
 	c.Set(fiber.HeaderContentType, *result.ContentType)
 
