@@ -1,0 +1,26 @@
+@import 'tailwindcss';
+
+:root {
+	--grid_increment: 100px;
+	--card_width: 250px;
+	--card_small: 26;
+	--card_medium: 33;
+	--card_large: 45;
+}
+
+.masonry-grid {
+	display: flex;
+	gap: 24px;
+}
+
+.masonry-column {
+	display: flex;
+	flex-direction: column;
+	gap: 24px;
+}
+
+.masonry-item img {
+	display: block;
+	width: 100%;
+	height: auto;
+}
