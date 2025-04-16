@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -124,6 +125,51 @@ func InitDatabase() {
 func HashPassword(password string) (string, error) {
     bytes, err := bcrypt.GenerateFromPassword([]byte(password), 14)
     return string(bytes), err
+}
+
+// get all s3 objects
+func GetAllS3Files(c *fiber.Ctx) error {
+	ctx := context.Background()
+	objects := []map[string]interface{}{}
+
+	objectCh := minioClient.ListObjects(ctx, bucket, minio.ListObjectsOptions{
+		Recursive: true,
+	})
+
+	for object := range objectCh {
+		if object.Err != nil {
+			return c.Status(http.StatusInternalServerError).JSON(fiber.Map{
+				"error": object.Err.Error(),
+			})
+		}
+
+		objects = append(objects, fiber.Map{
+			"key":          object.Key,
+			"size":         object.Size,
+			"lastModified": object.LastModified,
+		})
+	}
+
+	return c.JSON(objects)
+}
+
+func GetFileByID(c *fiber.Ctx) error {
+	fileID := c.Params("file_id")
+	ctx := context.Background()
+
+	object, err := minioClient.GetObject(ctx, bucket, fileID, minio.GetObjectOptions{})
+	if err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	// Получаем информацию о типе контента
+	info, err := object.Stat()
+	if err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+
+    c.Set("Content-Type", info.ContentType)
+	return c.SendStream(object)
 }
 
 func CheckPasswordHash(password, hash string) bool {
@@ -365,6 +411,7 @@ func main() {
 	app.Post("/api/auth/login", login)
 	app.Post("/api/auth/register", registerUser)
 
+	// MARK: допилить норм роутинг для вайбфронта
 
 	// Мидделваре
 	// app.Use(jwtware.New(jwtware.Config{
@@ -372,18 +419,24 @@ func main() {
 	// }))
 
 	// Защищённые маршруты
-	app.Get("/api/users", getUsers)
-	app.Get("/api/users/:id", getOneUser)
-	app.Patch("/api/users/:id", updateUser)
-	app.Delete("/api/users/:id", deleteUser)
+	users := app.Group("/api/users")
+	users.Get("", getUsers)
+	users.Get("/:id", getOneUser)
+	users.Patch("/:id", updateUser)
+	users.Delete("/:id", deleteUser)
 	// app.Get("/api/users/:id/images", getUserImages)
 	// app.Get("/api/users/:id/favorites", getUserFavorites)
 
-	app.Get("/api/images/all", getAllImages)
-	app.Get("/api/images/:id/info", getOneImageInfo)
-	app.Get("/api/images/:id", getOneImage)
-	app.Post("/api/images/upload", createImage)
-	// app.Delete("/api/images/:id", deleteImage)
+	images := app.Group("/api/images")
+	images.Get("/", getAllImages)
+	images.Get("/:id/info", getOneImageInfo)
+	images.Get("/:id", getOneImage)
+	images.Post("/upload", createImage)
+	// app.Delete("/:id", deleteImage)
+
+	s3 := app.Group("/api/s3")
+    s3.Get("/files", GetAllS3Files)
+    s3.Get("/files/:file_id", GetFileByID)
 
 	log.Println("Server is running on http://127.0.0.1:3000")
 	logrus.Fatal(app.Listen("127.0.0.1:3000"))
