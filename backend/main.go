@@ -51,7 +51,7 @@ func initMinIO() {
 	endpoint := fmt.Sprintf("%s:9000", minioHost)
 	
 	minioClient, err = minio.New(endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(os.Getenv("MINIO_ID"), os.Getenv("MINIO_SECRET"), ""),
+		Creds:  credentials.NewStaticV4(os.Getenv("MINIO_ROOT_USER"), os.Getenv("MINIO_ROOT_PASSWORD"), ""),
 		Secure: false,
 	})
 
@@ -238,6 +238,16 @@ func DeleteFile(c *fiber.Ctx) error {
 	return c.SendStatus(204)
 }
 
+func GetKeycloakPublicKey() []byte {
+    // Можно получить через: https://<keycloak>/realms/<realm-name>/protocol/openid-connect/certs
+    // И извлечь открытый ключ из JWK
+    // Тут можно использовать gocloak или сторонние пакеты
+    // Пример упрощён, лучше закешировать ключ
+    return []byte(`-----BEGIN PUBLIC KEY-----
+...
+-----END PUBLIC KEY-----`)
+}
+
 func main() {
     InitDatabase()
     initMinIO()
@@ -269,11 +279,21 @@ func main() {
     s3.Get("/files", GetAllS3Files)
     s3.Get("/files/:file_id", GetFileByID)
 
+
+	
+    // Публичный маршрут
+    app.Get("/", func(c *fiber.Ctx) error {
+        return c.SendString("Hello, anonymous user!")
+    })
+
+    // Защищённый маршрут
+    app.Get("/api/protected", func(c *fiber.Ctx) error {
+        return c.SendString("Hello, authenticated user!")
+    })
+
 	if !IS_PROD {
 		log.Fatal(app.Listen("localhost:3000"))
 	}else {
 		log.Fatal(app.Listen("0.0.0.0:3000"))
 	}
-
-	
 }
