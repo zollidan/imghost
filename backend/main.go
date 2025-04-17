@@ -7,16 +7,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/crypto/bcrypt"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -25,20 +22,39 @@ var (
 	db *gorm.DB
 	bucket string
 	minioClient *minio.Client
+	IS_PROD bool = false //os.Getenv("ENV") == "development" //production
 )
 
+type File struct {
+	ID      uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
+	Name    string `gorm:"uniqueIndex" json:"name"`
+	FileURL string `gorm:"uniqueIndex" json:"file_url"`
+}
+
 func initMinIO() {
-	if err := godotenv.Load("../.env"); err != nil {
-		logrus.Info("No .env file found")
+
+	if !IS_PROD {
+		if err := godotenv.Load("../.env"); err != nil {
+			logrus.Info("No .env file found for init MinIO")
+		}
 	}
 
 	bucket = os.Getenv("MINIO_BUCKET")
 
 	var err error
-	minioClient, err = minio.New("localhost:9000", &minio.Options{
+
+	minioHost := "localhost"
+	if IS_PROD {
+		minioHost = "minio"
+	}
+	
+	endpoint := fmt.Sprintf("%s:9000", minioHost)
+	
+	minioClient, err = minio.New(endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(os.Getenv("MINIO_ID"), os.Getenv("MINIO_SECRET"), ""),
-		Secure: false, // true, если HTTPS
+		Secure: false,
 	})
+
 	if err != nil {
 		log.Fatalf("Failed to initialize MinIO client: %v", err)
 	}
@@ -56,58 +72,20 @@ func initMinIO() {
 	}
 }
 
-type User struct {
-	ID           uuid.UUID `gorm:"type:uuid;primaryKey"`
-	Username     string    `gorm:"uniqueIndex;not null"`
-	Email        string    `gorm:"uniqueIndex;not null"`
-	PasswordHash string    `gorm:"not null"`
-	CreatedAt    time.Time
-
-	UserPhotos []UserPhoto
-	Favorites  []Favorite
-}
-
-type UserPhoto struct {
-	ID         uuid.UUID `gorm:"type:uuid;primaryKey"`
-	UserID     uuid.UUID `gorm:"type:uuid;not null"`
-	User       User      `gorm:"foreignKey:UserID"`
-	URL        string    `gorm:"not null"`
-	Title      string
-	UploadedAt time.Time `gorm:"autoCreateTime"`
-}
-
-type Favorite struct {
-	ID      uuid.UUID `gorm:"type:uuid;primaryKey"`
-	UserID  uuid.UUID `gorm:"type:uuid;not null"`
-	User    User      `gorm:"foreignKey:UserID"`
-	PhotoID uuid.UUID `gorm:"type:uuid;not null"`
-	Photo   UserPhoto `gorm:"foreignKey:PhotoID"`
-	SavedAt time.Time `gorm:"autoCreateTime"`
-}
-
-type UserSchema struct {
-	Username string `json:"username"`
-	Email    string `json:"email"`
-	Password string `json:"password"`
-}
-
-type UserLoginSchema struct {
-	Email string `json:"email"`
-	Password string `json:"password"`
-}
-
-type UserImageSchema struct {
-	Title      string	 `json:"title"`
-	UserID     uuid.UUID `json:"user_id"`
-}
-
 func InitDatabase() {
 
-	if err := godotenv.Load("../.env"); err != nil {
-        log.Print("No .env file found")
-    }
+	if !IS_PROD {
+		if err := godotenv.Load("../.env"); err != nil {
+			logrus.Info("No .env file found for init MinIO")
+		}
+	}
 
 	host := os.Getenv("POSTGRES_HOST")
+
+	if IS_PROD {
+		host = "postgres"
+	}
+
 	user := os.Getenv("POSTGRES_USER")
 	password := os.Getenv("POSTGRES_PASSWORD")
 	dbname := os.Getenv("POSTGRES_DB")
@@ -119,12 +97,7 @@ func InitDatabase() {
         log.Fatal(err)
     }
 
-	db.AutoMigrate(&User{}, &UserPhoto{}, &Favorite{})
-}
-
-func HashPassword(password string) (string, error) {
-    bytes, err := bcrypt.GenerateFromPassword([]byte(password), 14)
-    return string(bytes), err
+	db.AutoMigrate(&File{})
 }
 
 // get all s3 objects
@@ -172,272 +145,135 @@ func GetFileByID(c *fiber.Ctx) error {
 	return c.SendStream(object)
 }
 
-func CheckPasswordHash(password, hash string) bool {
-    err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
-    return err == nil
-}
-
-func getOneUser(c *fiber.Ctx) error {
-	id := c.Params("id")
-	
-	var user User 
-	if err := db.First(&user, "id = ?", id).Error; err != nil {
-		return c.Status(404).JSON(fiber.Map{
-			"error": "User not found",
-		})
-	} 
-
-	return c.JSON(user)
-}
-
-func updateUser(c *fiber.Ctx) error {
-	id := c.Params("id")
-
-	return c.JSON(fiber.Map{
-		"message": "User updated successfully",
-		"id": id,
-	})
-	
-}
-
-func deleteUser(c *fiber.Ctx) error {
-	id := c.Params("id")
-
-	var user User
-
-	if err := db.Delete(&user, "id = ?", id).Error; err != nil {
-		return c.Status(500).JSON(fiber.Map{
-			"error": "Error deleting user",
-		})
-	}
-
-	return c.JSON(fiber.Map{
-		"message": "User deleted successfully",
-	})
-}
-
-func getUsers(c *fiber.Ctx) error {
-	var users []User
-	if err := db.Find(&users).Error; err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Could not get users"})
-	}
-	return c.JSON(users)
-}
-
-func getAllImages(c *fiber.Ctx) error {
-	var images []UserPhoto
-	if err := db.Find(&images).Error; err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Could not get images"})
-	}
-
-	return c.JSON(images)
-}
-
-func createImage(c *fiber.Ctx) error {
-	newImageID := uuid.New()
-
-	title := c.FormValue("title")
-	userIDStr := c.FormValue("user_id")
-	userUUID, err := uuid.Parse(userIDStr)
+// Create
+func CreateFile(c *fiber.Ctx) error {
+	// Получаем файл из формы
+	fileHeader, err := c.FormFile("file")
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "Invalid user_id UUID"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "File not found in form"})
 	}
 
-	var body UserImageSchema
-	if err := c.BodyParser(&body); err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "Cannot parse JSON"})
-	}
-
-	fileHeader, err := c.FormFile("image")
+	// Открываем файл
+	fileReader, err := fileHeader.Open()
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "No file provided"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to open uploaded file"})
 	}
+	defer fileReader.Close()
 
-	file, err := fileHeader.Open()
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Failed to open uploaded file"})
-	}
-	defer file.Close()
+	// Генерируем UUID
+	id := uuid.New()
 
+	// Генерируем имя файла (UUID + расширение)
 	ext := filepath.Ext(fileHeader.Filename)
-	filename := fmt.Sprintf("%s%s", newImageID.String(), ext)
+	fileName := id.String() + ext
 
-	_, err = minioClient.PutObject(context.Background(), bucket, filename, file, fileHeader.Size, minio.PutObjectOptions{
+	// Загружаем в S3
+	ctx := context.Background()
+	_, err = minioClient.PutObject(ctx, bucket, fileName, fileReader, fileHeader.Size, minio.PutObjectOptions{
 		ContentType: fileHeader.Header.Get("Content-Type"),
 	})
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{
-			"error":   "Could not upload to MinIO",
-			"details": err.Error(),
-		})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 
-	publicURL := fmt.Sprintf("http://localhost:3000/api/images/%s", filename)
+	// Собираем S3 URL (или ты можешь использовать presigned URL)
+	fileURL := fmt.Sprintf("/api/s3/files/%s", fileName)
 
-	image := UserPhoto{
-		ID:         newImageID,
-		Title:      title,
-		URL:        publicURL,
-		UserID:     userUUID,
-		UploadedAt: time.Now(),
+	// Создаём запись в БД
+	file := File{
+		ID:      id,
+		Name:    fileName,
+		FileURL: fileURL,
 	}
 
-	if err := db.Create(&image).Error; err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Could not create image"})
+	if err := db.Create(&file).Error; err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 
-	return c.JSON(fiber.Map{
-		"message": "Upload successful",
-		"url":     publicURL,
-	})
+	return c.Status(fiber.StatusCreated).JSON(file)
 }
 
-func getOneImageInfo(c *fiber.Ctx) error {
+// Get all
+func GetFiles(c *fiber.Ctx) error {
+	var files []File
+	db.Find(&files)
+	return c.JSON(files)
+}
+
+// Get by ID
+func GetFile(c *fiber.Ctx) error {
 	id := c.Params("id")
-	
-	var image UserPhoto 
-	if err := db.First(&image, "id = ?", id).Error; err != nil {
-		return c.Status(404).JSON(fiber.Map{
-			"error": "User not found",
-		})
-	} 
+	var file File
 
-	return c.JSON(image)
+	if err := db.First(&file, "id = ?", id).Error; err != nil {
+		return c.Status(404).JSON(fiber.Map{"error": "File not found"})
+	}
+
+	return c.JSON(file)
 }
 
-func getOneImage(c *fiber.Ctx) error {
+// Update
+func UpdateFile(c *fiber.Ctx) error {
 	id := c.Params("id")
+	var file File
 
-	object, err := minioClient.GetObject(context.Background(), bucket, id, minio.GetObjectOptions{})
-	if err != nil {
-		log.Printf("Error fetching object from MinIO: %v", err)
-		return c.Status(500).JSON(fiber.Map{
-			"error": "Failed to fetch image",
-		})
+	if err := db.First(&file, "id = ?", id).Error; err != nil {
+		return c.Status(404).JSON(fiber.Map{"error": "File not found"})
 	}
 
-	info, err := object.Stat()
-	if err != nil {
-		log.Printf("Error reading object metadata: %v", err)
-		return c.Status(404).JSON(fiber.Map{
-			"error": "Image not found",
-		})
+	if err := c.BodyParser(&file); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "cannot parse JSON"})
 	}
 
-	c.Set(fiber.HeaderContentType, info.ContentType)
-
-	return c.SendStream(object)
+	db.Save(&file)
+	return c.JSON(file)
 }
 
-func registerUser(c *fiber.Ctx) error {
-
-	var body UserSchema
-	if err := c.BodyParser(&body); err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "Cannot parse JSON"})
+// Delete
+func DeleteFile(c *fiber.Ctx) error {
+	id := c.Params("id")
+	if err := db.Delete(&File{}, "id = ?", id).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
-
-	hash, _ := HashPassword(body.Password)
-
-	user := User{
-		ID:           uuid.New(),
-		Username:     body.Username,
-		Email:        body.Email,
-		PasswordHash: hash,
-		CreatedAt:    time.Now(),
-	}
-
-	if err := db.Create(&user).Error; err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Could not create user"})
-	}
-
-	return c.JSON(user)
-}
-
-func login(c *fiber.Ctx) error {
-
-	var body UserLoginSchema
-	if err := c.BodyParser(&body); err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "Cannot parse JSON"})
-	}
-
-	var user User 
-	if err := db.First(&user, "email = ?", body.Email).Error; err != nil {
-		return c.Status(404).JSON(fiber.Map{
-			"error": "User not found",
-		})
-	} 
-
-	isPasswordValid := CheckPasswordHash(body.Password, user.PasswordHash)
-	if !isPasswordValid {
-		return c.Status(401).JSON(fiber.Map{
-			"error": "Invalid password",
-		})
-	}
-
-	// Create the Claims
-	claims := jwt.MapClaims{
-	 "email":  user.Email,
-	 "exp":   time.Now().Add(time.Hour * 72).Unix(),
-	}
-	
-	// Create token
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-   
-	// Generate encoded token and send it as response.
-	t, err := token.SignedString([]byte("secret"))
-	if err != nil {
-	 return c.SendStatus(fiber.StatusInternalServerError)
-	}
-   
-	return c.JSON(fiber.Map{"token": t})
+	return c.SendStatus(204)
 }
 
 func main() {
-	InitDatabase()
-	initMinIO()
+    InitDatabase()
+    initMinIO()
 
 	app := fiber.New(fiber.Config{
-		AppName: "ImgHost API",
-	})
+        AppName: "aafbet API",
+    })
 
 	app.Get("/api/hello", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{
-			"message": "Hello, this is ImgHost API!",
+			"message": "Hello, this is aafbet API!",
 			"version": "0.0.1",
 		})
 	})
 
-	// Открытые маршруты
-	app.Post("/api/auth/login", login)
-	app.Post("/api/auth/register", registerUser)
-
-	// MARK: допилить норм роутинг для вайбфронта
-
-	// Мидделваре
+    // Мидделваре
 	// app.Use(jwtware.New(jwtware.Config{
 	// 	SigningKey: jwtware.SigningKey{Key: []byte("secret")},
 	// }))
 
-	// Защищённые маршруты
-	users := app.Group("/api/users")
-	users.Get("", getUsers)
-	users.Get("/:id", getOneUser)
-	users.Patch("/:id", updateUser)
-	users.Delete("/:id", deleteUser)
-	// app.Get("/api/users/:id/images", getUserImages)
-	// app.Get("/api/users/:id/favorites", getUserFavorites)
+    files := app.Group("/api/files")
+	files.Post("/", CreateFile)
+	files.Get("/", GetFiles)
+	files.Get("/:id", GetFile)
+	files.Put("/:id", UpdateFile)
+	files.Delete("/:id", DeleteFile)
 
-	images := app.Group("/api/images")
-	images.Get("/", getAllImages)
-	images.Get("/:id/info", getOneImageInfo)
-	images.Get("/:id", getOneImage)
-	images.Post("/upload", createImage)
-	// app.Delete("/:id", deleteImage)
-
-	s3 := app.Group("/api/s3")
+    s3 := app.Group("/api/s3")
     s3.Get("/files", GetAllS3Files)
     s3.Get("/files/:file_id", GetFileByID)
 
-	log.Println("Server is running on http://127.0.0.1:3000")
-	logrus.Fatal(app.Listen("127.0.0.1:3000"))
+	if !IS_PROD {
+		log.Fatal(app.Listen("localhost:3000"))
+	}else {
+		log.Fatal(app.Listen("0.0.0.0:3000"))
+	}
+
+	
 }
