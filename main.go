@@ -1,12 +1,17 @@
 package main
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -15,9 +20,10 @@ import (
 /*
 	Roadmap
 	1.IPFS
-	2.Infura or Pinata
-	3.Crypt
-	4.ui
+	2.AES-256-GCM
+	3.Infura or Pinata
+	4.Crypt
+	5.ui
 */
 
 type IndexData struct {
@@ -27,10 +33,80 @@ type IndexData struct {
 	IsError bool
 }
 
+type EncryptionResult struct {
+    EncryptedData string `json:"encrypted_data"`
+    Nonce         string `json:"nonce"`
+    Key           string `json:"key"`
+}
+
 var tmpl *template.Template
 
 func init(){
 	tmpl = template.Must(template.ParseFiles("index.html"))
+
+	os.MkdirAll("./uploads", 0755)
+	os.MkdirAll("./encrypted", 0755)
+}
+
+// создает случайный 32-байтовый ключ
+func generateRandomKey() ([]byte, error) {
+    key := make([]byte, 32)
+    _, err := rand.Read(key)
+    return key, err
+}
+
+// encryptData шифрует данные с использованием AES-256-GCM
+func encryptData(data []byte, key []byte) ([]byte, []byte, error) {
+    block, err := aes.NewCipher(key)
+    if err != nil {
+        return nil, nil, err
+    }
+
+    gcm, err := cipher.NewGCM(block)
+    if err != nil {
+        return nil, nil, err
+    }
+
+    nonce := make([]byte, gcm.NonceSize())
+    if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+        return nil, nil, err
+    }
+
+    ciphertext := gcm.Seal(nil, nonce, data, nil)
+    
+    return ciphertext, nonce, nil
+}
+
+func encryptFile(inputPath, outputPath string, key []byte) ([]byte, error) {
+    data, err := os.ReadFile(inputPath)
+    if err != nil {
+        return nil, err
+    }
+
+    ciphertext, nonce, err := encryptData(data, key)
+    if err != nil {
+        return nil, err
+    }
+
+    encryptedFile := struct {
+        Data  []byte `json:"data"`
+        Nonce []byte `json:"nonce"`
+    }{
+        Data:  ciphertext,
+        Nonce: nonce,
+    }
+
+    jsonData, err := json.Marshal(encryptedFile)
+    if err != nil {
+        return nil, err
+    }
+
+    err = os.WriteFile(outputPath, jsonData, 0644)
+    if err != nil {
+        return nil, err
+    }
+
+    return nonce, nil
 }
 
 func main() {
@@ -50,52 +126,63 @@ func main() {
 		}
 	})
 
-	r.Get("/file/{filename}", func(w http.ResponseWriter, r *http.Request) {
-		filename := chi.URLParam(r, "filename")
+    r.Post("/file/upload", func(w http.ResponseWriter, r *http.Request) {
+        // Парсим форму (10 MB max)
+        err := r.ParseMultipartForm(10 << 20)
+        if err != nil {
+            http.Error(w, fmt.Sprintf("Failed to parse multipart form: %v", err), http.StatusBadRequest)
+            return
+        }
 
-		json.NewEncoder(w).Encode(filename)
-	})
-
-	r.Post("/file/upload", func(w http.ResponseWriter, r *http.Request) {
-		// Оператор << в Go выполняет побитовый сдвиг влево (выделяю место под файл 10мб)
-		// Set a maximum memory for parsing the form data (e.g., 10 MB)
-		err := r.ParseMultipartForm(10 << 20)
+        file, fileHeader, err := r.FormFile("file")
+        if err != nil {
+            http.Error(w, fmt.Sprintf("Failed to get file: %v", err), http.StatusBadRequest)
+            return
+        }
+        defer file.Close()
+        
+        var key []byte
+ 
+		key, err = generateRandomKey()
 		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to parse multipart form: %v", err), http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("Failed to generate key: %v", err), http.StatusInternalServerError)
 			return
 		}
-		// Get the file from the request. The "file" here refers to the name
-		// attribute in your HTML input type="file" tag.
-		file, fileHeader, err := r.FormFile("file")
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to get file: %v", err), http.StatusBadRequest)
-			return
-		}
-		defer file.Close()
+        
+        originalPath := filepath.Join("./uploads", fileHeader.Filename)
+        dst, err := os.Create(originalPath)
+        if err != nil {
+            http.Error(w, fmt.Sprintf("Failed to create file on server: %v", err), http.StatusInternalServerError)
+            return
+        }
+        defer dst.Close()
 
-		// Create a new file on the server to save the uploaded content
-		dst, err := os.Create("./uploads/" + fileHeader.Filename)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to create file on server: %v", err), http.StatusInternalServerError)
-			return
-		}
+        if _, err := io.Copy(dst, file); err != nil {
+            http.Error(w, fmt.Sprintf("Failed to copy file content: %v", err), http.StatusInternalServerError)
+            return
+        }
 
-		// Copy the uploaded file content to the new file on the server
-		if _, err := io.Copy(dst, file); err != nil {
-			http.Error(w, fmt.Sprintf("Failed to copy file content: %v", err), http.StatusInternalServerError)
-			return
-		}
+        encryptedPath := filepath.Join("./encrypted", fileHeader.Filename+".enc")
+        nonce, err := encryptFile(originalPath, encryptedPath, key)
+        if err != nil {
+            http.Error(w, fmt.Sprintf("Failed to encrypt file: %v", err), http.StatusInternalServerError)
+            return
+        }
 
-		response := map[string]string{
-			"message":  "File uploaded successfully!",
-			"filename": fileHeader.Filename,
-			"size":     fmt.Sprintf("%d bytes", fileHeader.Size),
-		}
-		w.Header().Add("Content-Type", "application/json")
+        os.Remove(originalPath)
 
-		json.NewEncoder(w).Encode(response) 
-	})
+        response := map[string]interface{}{
+            "message":        "File uploaded and encrypted successfully!",
+            "filename":       fileHeader.Filename,
+            "encrypted_file": fileHeader.Filename + ".enc",
+            "size":          fmt.Sprintf("%d bytes", fileHeader.Size),
+            "key":           base64.StdEncoding.EncodeToString(key),
+            "nonce":         base64.StdEncoding.EncodeToString(nonce),
+        }
 
+        w.Header().Add("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(response)
+    })
 
 	fmt.Println("Server is running on http://localhost:8000/")
 	http.ListenAndServe("localhost:8000", r)
