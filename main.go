@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
 	"net/http"
 	"os"
@@ -11,10 +12,49 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 )
 
+/*
+	Roadmap
+	1.IPFS
+	2.Infura or Pinata
+	3.Crypt
+	4.ui
+*/
+
+type IndexData struct {
+	Title   string
+	Header  string
+	Message string
+	IsError bool
+}
+
+var tmpl *template.Template
+
+func init(){
+	tmpl = template.Must(template.ParseFiles("index.html"))
+}
+
 func main() {
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+
+	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		data := IndexData{
+			Title:  "Загрузка файла",
+			Header: "Загрузить ваш файл",
+		}
+		err := tmpl.Execute(w, data)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Ошибка при рендеринге шаблона: %v", err), http.StatusInternalServerError)
+			return
+		}
+	})
+
+	r.Get("/file/{filename}", func(w http.ResponseWriter, r *http.Request) {
+		filename := chi.URLParam(r, "filename")
+
+		json.NewEncoder(w).Encode(filename)
+	})
 
 	r.Post("/file/upload", func(w http.ResponseWriter, r *http.Request) {
 		// Оператор << в Go выполняет побитовый сдвиг влево (выделяю место под файл 10мб)
