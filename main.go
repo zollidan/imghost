@@ -20,11 +20,16 @@ import (
 /*
 	Roadmap
 	1.IPFS
-	2.AES-256-GCM
+	2.AES-256-GCM (https://dev.to/breda/secret-key-encryption-with-go-using-aes-316d)
 	3.Infura or Pinata
-	4.Crypt
-	5.ui
+	4.ui
 */
+
+var 
+(
+    tmpl *template.Template
+    host string = "localhost:8000"
+)
 
 type IndexData struct {
 	Title   string
@@ -39,7 +44,7 @@ type EncryptionResult struct {
     Key           string `json:"key"`
 }
 
-var tmpl *template.Template
+
 
 func init(){
 	tmpl = template.Must(template.ParseFiles("index.html"))
@@ -184,6 +189,6 @@ func main() {
         json.NewEncoder(w).Encode(response)
     })
 
-	fmt.Println("Server is running on http://localhost:8000/")
-	http.ListenAndServe("localhost:8000", r)
+	fmt.Printf("Server is running on http://%s/", host)
+	http.ListenAndServe(host, r)
 }
