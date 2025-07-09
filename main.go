@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -9,6 +11,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,6 +20,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 /*
@@ -28,8 +33,10 @@ import (
 */
 
 var (
-	tmpl *template.Template
-	host string = "localhost:8000"
+	tmpl        *template.Template
+	host        string = "localhost:8000"
+	minioClient *minio.Client
+	bucketName  string = "imghost-files"
 )
 
 type IndexData struct {
@@ -56,6 +63,54 @@ func init() {
 
 	os.MkdirAll("./uploads", 0755)
 	os.MkdirAll("./encrypted", 0755)
+
+	initMinIO()
+}
+
+func initMinIO() {
+	endpoint := os.Getenv("MINIO_ENDPOINT")
+	if endpoint == "" {
+		endpoint = "localhost:9000"
+	}
+
+	accessKey := os.Getenv("MINIO_ACCESS_KEY")
+	if accessKey == "" {
+		accessKey = "minioadmin"
+	}
+
+	secretKey := os.Getenv("MINIO_SECRET_KEY")
+	if secretKey == "" {
+		secretKey = "minioadmin123"
+	}
+
+	useSSL := os.Getenv("MINIO_USE_SSL") == "true"
+
+	if bucketEnv := os.Getenv("MINIO_BUCKET"); bucketEnv != "" {
+		bucketName = bucketEnv
+	}
+
+	var err error
+	minioClient, err = minio.New(endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
+		Secure: useSSL,
+	})
+	if err != nil {
+		log.Fatal("Failed to initialize MinIO client:", err)
+	}
+
+	// Create bucket if it doesn't exist
+	ctx := context.Background()
+	exists, err := minioClient.BucketExists(ctx, bucketName)
+	if err != nil {
+		log.Fatal("Failed to check bucket existence:", err)
+	}
+	if !exists {
+		err = minioClient.MakeBucket(ctx, bucketName, minio.MakeBucketOptions{})
+		if err != nil {
+			log.Fatal("Failed to create bucket:", err)
+		}
+		log.Printf("Bucket %s created successfully", bucketName)
+	}
 }
 
 // создает случайный 32-байтовый ключ
@@ -87,7 +142,7 @@ func encryptData(data []byte, key []byte) ([]byte, []byte, error) {
 	return ciphertext, nonce, nil
 }
 
-func encryptFile(inputPath, outputPath string, key []byte) ([]byte, error) {
+func encryptFile(inputPath, objectName string, key []byte) ([]byte, error) {
 	data, err := os.ReadFile(inputPath)
 	if err != nil {
 		return nil, err
@@ -111,7 +166,12 @@ func encryptFile(inputPath, outputPath string, key []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	err = os.WriteFile(outputPath, jsonData, 0644)
+	// Upload to MinIO
+	ctx := context.Background()
+	reader := bytes.NewReader(jsonData)
+	_, err = minioClient.PutObject(ctx, bucketName, objectName, reader, int64(len(jsonData)), minio.PutObjectOptions{
+		ContentType: "application/json",
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -119,8 +179,14 @@ func encryptFile(inputPath, outputPath string, key []byte) ([]byte, error) {
 	return nonce, nil
 }
 
-func scheduleDeletion(path string, d time.Duration) {
-	time.AfterFunc(d, func() { os.Remove(path) })
+func scheduleDeletion(objectName string, d time.Duration) {
+	time.AfterFunc(d, func() {
+		ctx := context.Background()
+		err := minioClient.RemoveObject(ctx, bucketName, objectName, minio.RemoveObjectOptions{})
+		if err != nil {
+			log.Printf("Failed to delete object %s: %v", objectName, err)
+		}
+	})
 }
 
 // decryptData расшифровывает данные используя AES-256-GCM
