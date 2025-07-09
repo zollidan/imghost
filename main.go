@@ -142,8 +142,9 @@ func encryptData(data []byte, key []byte) ([]byte, []byte, error) {
 	return ciphertext, nonce, nil
 }
 
-func encryptFile(inputPath, objectName string, key []byte) ([]byte, error) {
-	data, err := os.ReadFile(inputPath)
+func encryptFileStream(fileReader io.Reader, objectName string, key []byte) ([]byte, error) {
+	// Читаем данные из потока
+	data, err := io.ReadAll(fileReader)
 	if err != nil {
 		return nil, err
 	}
@@ -268,36 +269,20 @@ func main() {
 		}
 		defer file.Close()
 
-		var key []byte
-
-		key, err = generateRandomKey()
+		key, err := generateRandomKey()
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Failed to generate key: %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		originalPath := filepath.Join("./uploads", fileHeader.Filename)
-		dst, err := os.Create(originalPath)
+		objectName := fileHeader.Filename + ".enc"
+		nonce, err := encryptFileStream(file, objectName, key)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to create file on server: %v", err), http.StatusInternalServerError)
-			return
-		}
-		defer dst.Close()
-
-		if _, err := io.Copy(dst, file); err != nil {
-			http.Error(w, fmt.Sprintf("Failed to copy file content: %v", err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("Failed to encrypt and upload file: %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		encryptedPath := filepath.Join("./encrypted", fileHeader.Filename+".enc")
-		nonce, err := encryptFile(originalPath, encryptedPath, key)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to encrypt file: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		os.Remove(originalPath)
-		scheduleDeletion(encryptedPath, 15*time.Minute)
+		scheduleDeletion(objectName, 15*time.Minute)
 
 		response := map[string]interface{}{
 			"message":        "File uploaded and encrypted successfully!",
